@@ -1,0 +1,406 @@
+<?php
+
+/**
+ * @file
+ * commerce_extra_tokens main module file.
+ */
+
+/**
+ * Loads all orders for user.
+ */
+function commerce_extra_tokens_all_completed_orders_by_user($uid) {
+
+  $statuses = commerce_extra_tokens_get_statuses_for_state('completed');
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'commerce_order')
+  ->propertyCondition('uid', $uid)
+  ->propertyCondition('status', $statuses, 'IN')
+  ->propertyOrderBy('created', 'DESC');
+
+  $orders = array();
+  $result = $query->execute();
+  if (!empty($result['commerce_order'])) {
+    foreach ($result['commerce_order'] as $id => $order) {
+      $orders[$id] = entity_load_single('commerce_order', $id);
+    }
+  }
+  return $orders;
+}
+
+function commerce_extra_tokens_get_statuses_for_state($states) {
+
+  if (!is_array($states)) {
+    $states = array($states);
+  }
+  // Get 'completed' statuses
+  $statuses = module_invoke_all('commerce_order_status_info');
+  $return = array();
+  foreach ($statuses as $status) {
+    if (in_array($status['state'], $states)) {
+      $return[] = $status['name'];
+    }
+  }
+
+  return $return;
+}
+
+function commerce_extra_tokens_last_abandonned_order_by_user($uid) {
+  $statuses = commerce_extra_tokens_get_statuses_for_state(array('cart', 'checkout'));
+
+  // Abandonned after 1 day
+  $abandonned_interval = 60*60*24;
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'commerce_order')
+  ->propertyCondition('uid', $uid)
+  ->propertyCondition('status', $statuses, 'IN')
+  ->propertyCondition('created', (REQUEST_TIME - $abandonned_interval), '<')
+  ->propertyOrderBy('created', 'DESC')
+  ->range(0, 1);
+
+  $return = array();
+  $result = $query->execute();
+  if (!empty($result['commerce_order'])) {
+    return entity_load_single('commerce_order', key($result['commerce_order']));
+  }
+
+  return NULL;
+}
+
+function commerce_extra_tokens_get_product_ids_for_all_orders($uid) {
+
+  $product_ids = array();
+  
+  $orders = commerce_extra_tokens_all_completed_orders_by_user($uid);
+  foreach ($orders as $order) {
+    foreach (entity_metadata_wrapper('commerce_order', $order)->commerce_line_items as $delta => $line_item_wrapper) {
+      if (in_array($line_item_wrapper->type->value(), commerce_product_line_item_types())) {
+        $product_ids[$line_item_wrapper->commerce_product->raw()] = TRUE;
+      }
+    }
+  }
+
+  return implode(',', array_keys($product_ids));
+}
+
+
+function commerce_extra_tokens_unique_product_term_ids($order, $field_name) {
+  $term_ids = array();
+  foreach (entity_metadata_wrapper('commerce_order', $order)->commerce_line_items as $delta => $line_item_wrapper) {
+    if (in_array($line_item_wrapper->type->value(), commerce_product_line_item_types())) {
+      if ($line_item_wrapper->commerce_product->__isset($field_name)) {
+        $terms = $line_item_wrapper->commerce_product->{$field_name}->value();
+        foreach ($terms as $term) {
+          $term_ids[$term->tid] = TRUE;
+        }
+      }
+    }
+  }
+
+  return implode(',', array_keys($term_ids));
+}
+
+function commerce_extra_tokens_get_product_ids_for_order($order) {
+  $product_ids = array();
+  foreach (entity_metadata_wrapper('commerce_order', $order)->commerce_line_items as $delta => $line_item_wrapper) {
+    if (in_array($line_item_wrapper->type->value(), commerce_product_line_item_types())) {
+      $product_ids[$line_item_wrapper->commerce_product->raw()] = TRUE;
+    }
+  }
+
+  return implode(',', array_keys($product_ids));
+}
+
+/**
+ * Loads last shipped orders.
+ */
+function commerce_extra_tokens_last_order_by_user($uid) {
+
+  $statuses = commerce_extra_tokens_get_statuses_for_state(array('cart', 'canceled'));
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'commerce_order')
+  ->propertyCondition('uid', $uid)
+  ->propertyCondition('status', $statuses, 'NOT IN')
+  ->propertyOrderBy('created', 'DESC')
+  ->range(0, 1);
+
+  $return = array();
+  $result = $query->execute();
+  if (!empty($result['commerce_order'])) {
+    return entity_load_single('commerce_order', key($result['commerce_order']));
+  }
+
+  return NULL;
+}
+
+/**
+ * Loads last shipped orders.
+ */
+function commerce_extra_tokens_last_shipped_order_by_user($uid) {
+
+  $statuses = commerce_extra_tokens_get_statuses_for_state('completed');
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'commerce_order')
+  ->propertyCondition('uid', $uid)
+  ->propertyCondition('status', $statuses, 'IN')
+  ->propertyOrderBy('created', 'DESC')
+  ->range(0, 1);
+
+  $return = array();
+  $result = $query->execute();
+  if (!empty($result['commerce_order'])) {
+    return entity_load_single('commerce_order', key($result['commerce_order']));
+  }
+
+  return NULL;
+}
+
+function commerce_extra_tokens_sum_order_values_for_intervals($uid) {
+
+  $intervals = array('year' => strtotime('-1 year'), 'month' => strtotime('-1 month'));
+
+  $orders = commerce_extra_tokens_all_completed_orders_by_user($uid);
+
+  $totals = array('ever' => 0);
+  foreach ($intervals as $k => $v) {
+    $totals[$k] = 0;
+  }
+
+  $product_item_ids = array();
+
+  $default_currency_code = commerce_default_currency();
+  $default_currency = commerce_currency_load($default_currency_code);
+
+  foreach ($orders as $order) {
+
+    $order_total = field_get_items('commerce_order', $order, 'commerce_order_total');
+
+    if (!empty($order_total)) {
+      $price = reset($order_total);
+
+      $converted_total = commerce_currency_convert(
+        $price['amount'],
+        $price['currency_code'],
+        $default_currency_code
+      );
+
+      $totals['ever'] += $converted_total;
+
+      foreach ($intervals as $key => $timestamp) {
+        if ($order->created > $timestamp) {     
+          $totals[$key] += $converted_total;
+        }
+      }
+      
+    }
+  }
+  
+  // Output as decimal
+  foreach ($totals as $key => $value) {
+    $decimal_total = commerce_currency_amount_to_decimal($value, $default_currency_code);
+    $totals[$key] = number_format($decimal_total, $default_currency['decimals'], '.', '');
+  }
+
+  return $totals;
+}
+
+function commerce_extra_tokens_line_items($order, $theme = TRUE) {
+  // Create the commerce order wrapper.
+  $wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+  // Set the orders currency code.
+  $currency_code = $wrapper->commerce_order_total->currency_code->value();
+
+  // Load the inline styles for the table.
+  $styles = _commerce_extra_tokens_inline_styles();
+
+  // Define the table headers.
+  $header = array(
+    array('data' => t('SKU'), 'style' => array('text-align: left;' . $styles['th_style'])),
+    array('data' => t('Product'), 'style' => array('text-align: left;' . $styles['th_style'])),
+    array('data' => t('Cost'), 'style' => array('text-align: right;' . $styles['th_style'])),
+    array('data' => t('Qty'), 'style' => array('text-align: right;' . $styles['th_style'])),
+    array('data' => t('Price (@currency_code)', array('@currency_code' => $currency_code)), 'style' => array('text-align: right;' . $styles['th_style'])),
+  );
+
+  $rows = array();
+
+  $product_types = array();
+
+  foreach (commerce_product_types() as $commerce_product_type) {
+    $product_types[] = $commerce_product_type['type'];
+  }
+
+  // Loop through the line items in the order.
+  foreach ($wrapper->commerce_line_items as $line_item_wrapper) {
+
+    // Create cases for each line item type.
+    switch ($line_item_wrapper->type->value()) {
+
+      // If the line item is a product reference.
+      case (in_array($line_item_wrapper->type->value(), $product_types)):
+        $sku = $line_item_wrapper->commerce_product->sku->value();
+        // Use the product title instead of the line item title for products.
+        $title = htmlentities($line_item_wrapper->commerce_product->title->value(), ENT_QUOTES, 'UTF-8');
+
+        $rows[] = array(
+          'data' => array(
+            array('data' => $sku, 'style' => array('text-align: left;' . $styles['td_style'])),
+            array('data' => $title, 'style' => array('text-align: left;' . $styles['td_style'])),
+            array('data' => commerce_currency_format($line_item_wrapper->commerce_unit_price->amount->value(), $currency_code), 'style' => array('text-align: right;' . $styles['td_style'])),
+            array('data' => $line_item_wrapper->quantity->value(), 'style' => array('text-align: right;' . $styles['td_style'])),
+            array('data' => commerce_currency_format($line_item_wrapper->commerce_total->amount->value(), $currency_code), 'style' => array('text-align: right;' . $styles['td_style'])),
+          )
+        );
+        break;
+      // If the line item type is a shipping line item.
+      case 'shipping':
+        $rows[] = array(
+          'data' => array(
+            array('data' => 'Shipping Service', 'header' => TRUE, 'colspan' => '2', 'style' => array('text-align: left;' . $styles['th_style'])),
+            array('data' => '', 'header' => TRUE, 'style' => array('text-align: left;' . $styles['th_style'])),
+            array('data' => '', 'header' => TRUE, 'style' => array('text-align: left;' . $styles['th_style'])),
+            array('data' => 'Cost', 'header' => TRUE, 'style' => array('text-align: right;' . $styles['th_style'])),
+          ),
+          'no_striping' => TRUE
+        );
+        $rows[] = array(
+          'data' => array(
+            array('data' => htmlentities($line_item_wrapper->line_item_label->value(), ENT_QUOTES, 'UTF-8'), 'style' => array('text-align: left;' . $styles['td_style'])),
+            ' ',
+            ' ',
+            ' ',
+            array('data' => commerce_currency_format($line_item_wrapper->commerce_unit_price->amount->value(), $currency_code), 'style' => array('text-align: right;' . $styles['td_style'])),
+          )
+        );
+        break;
+      default:
+        // Any other type of line item not defined above will be added here.
+        $rows[] = array(
+          'data' => array(
+            ' ',
+            array('data' => htmlentities($line_item_wrapper->line_item_label->value(), ENT_QUOTES, 'UTF-8'), 'style' => array('text-align: left;' . $styles['td_style'])),
+            array('data' => commerce_currency_format($line_item_wrapper->commerce_unit_price->amount->value(), $currency_code), 'style' => array('text-align: right;' . $styles['td_style'])),
+            array('data' => 1, 'style' => array('text-align: right;' . $styles['td_style'])),
+            array('data' => commerce_currency_format($line_item_wrapper->commerce_unit_price->amount->value(), $currency_code), 'style' => array('text-align: right;' . $styles['td_style'])),
+          )
+        );
+        break;
+    }
+  }
+
+  if ($theme) {
+    return theme('table', array('header' => $header, 'rows' => $rows, 'attributes' => array('cellspacing' => 0, 'style' => array($styles['table_style']))));
+  }
+  else {
+    return array('header' => $header, 'rows' => $rows, 'attributes' => array('style' => array('width: 50%; border: 1px solid #ddd;')));
+  }
+}
+
+function commerce_extra_tokens_total($order, $theme = TRUE) {
+  // Load the inline styles for the table.
+  $styles = _commerce_extra_tokens_inline_styles();
+  $wrapper = entity_metadata_wrapper('commerce_order', $order);
+  
+  // Set the orders currency code.
+  $currency_code = $wrapper->commerce_order_total->currency_code->value();
+ 
+  // Set the order total amount.
+  $amount = commerce_currency_format($wrapper->commerce_order_total->amount->value(), $currency_code);
+
+  $data = $wrapper->commerce_order_total->data->value();
+  if (!empty($data['components'])) {
+
+    foreach ($data['components'] as $key => &$component) {
+
+      if ($data['components'][$key]['name'] == 'base_price') {
+        $rows[] = array(
+          'data' => array(
+            array('data' => t('Subtotal:'), 'style' => array('font-weight: bold; text-align: right;' . $styles['td_style'])),
+            array('data' => commerce_currency_format($data['components'][$key]['price']['amount'], $currency_code), 'style' => array('font-weight: bold; text-align: right;' . $styles['td_style'])),
+          )
+        );
+      }
+      elseif (preg_match('/^tax\|/', $data['components'][$key]['name'])) {
+        $rows[] = array(
+          'data' => array(
+            array('data' => $data['components'][$key]['price']['data']['tax_rate']['display_title'] . ':', 'style' => array('font-weight: bold; text-align: right;' . $styles['td_style'])),
+            array('data' => commerce_currency_format($data['components'][$key]['price']['amount'], $currency_code), 'style' => array('font-weight: bold; text-align: right;' . $styles['td_style'])),
+          )
+        );
+      }
+    }
+  }
+
+  $rows[] = array(
+    'data' => array(
+      array('data' => t('Total:'), 'style' => array('font-weight: bold; text-align: right;' . $styles['td_style'])),
+      array('data' => $amount, 'style' => array('font-weight: bold; text-align: right;' . $styles['td_style'])),
+    )
+  );
+  if ($theme) {
+    return theme('table', array('rows' => $rows, 'attributes' => array('cellspacing' => 0, 'style' => array($styles['table_style']))));
+  }
+  else {
+    return array('rows' => $rows, 'attributes' => array('style' => array('width: 50%; border: 1px solid #ddd;')));
+  }
+}
+
+function commerce_extra_tokens_payments($order, $theme = TRUE) {
+  // Load the inline styles for the table.
+  $styles = _commerce_extra_tokens_inline_styles();
+
+  if (function_exists('commerce_payment_transaction_load_multiple')) {
+    $transactions = commerce_payment_transaction_load_multiple(array(), array('order_id' => $order->order_id));
+    if (!empty($transactions)) {
+      $header = array(
+        array(
+          'data' => 'Payments',
+          'header' => TRUE,
+          'colspan' => '2',
+          'style' => array('text-align: left;' . $styles['th_style']),
+        ),
+      );
+
+      $payment_methods = commerce_payment_methods();
+      foreach ($transactions as $transaction) {
+        $payment_title = $payment_methods[$transaction->payment_method]['title'];
+        $rows[] = array(
+          'data' => array(
+            array(
+              'data' => $payment_title,
+              'style' => array('text-align: left;' . $styles['td_style']),
+            ),
+            array(
+              'data' => commerce_currency_format($transaction->amount, $transaction->currency_code),
+              'style' => array('text-align: right;' . $styles['td_style']),
+            ),
+          ),
+        );
+      }
+      if ($theme) {
+        return theme('table', array('rows' => $rows, 'attributes' => array('cellspacing' => 0, 'style' => array($styles['table_style']))));
+      }
+      else {
+        return array('header' => $header, 'rows' => $rows, 'attributes' => array('style' => array('width: 50%; border: 1px solid #ddd;')));
+      }
+    }
+  }
+}
+
+function _commerce_extra_tokens_inline_styles() {
+  // Define the inline table styles as an array.
+  $inline_styles = array(
+    'table_style' => 'width: 100%; border: 1px solid #ddd; border-spacing: 0; font-family: Verdana,Geneva;',
+    'th_style' => 'padding: 10px 14px; background-color: #333333;border: medium none;color: #FCFCF8;',
+    'td_style' => 'padding: 10px 14px; vertical-align: middle;',
+  );
+
+  // Allow other modules to override these styles.
+  drupal_alter('commerce_extra_tokens_inline_styles', $inline_styles);
+
+  return $inline_styles;
+}
